@@ -1,13 +1,20 @@
 // @ts-ignore
 import * as kb from "./modules/ble_hid_keyboard";
-import {blink, debounce} from "./lib";
+// @ts-ignore
+import * as controls from "./modules/ble_hid_telephony";
+import {blink, ledOnOff, debounce} from "./lib";
+
+// https://github.com/tomgidden/page-turn-o-matic/blob/master/page-turn-o-matic.js
 
 const RELEASE = false;
+const USE_LOW_POWER = false;
+const SLEEP_TIMEOUT = 1000 * 60 * 10;
+const DOUBLE_CLICK_DETECTION_TIME = 350;
+enum MutingTypes {
+  TEAMS, 
+  TELEPHONY
+}
 
-let sleepTimer: NodeJS.Timeout;
-let reportInterval: NodeJS.Timeout;
-
-let sleepState: SleepStates;
 enum SleepStates {
   AWAKE, SLEEPING
 }
@@ -16,14 +23,28 @@ enum ClickType {
   SINGLE, DOUBLE
 }
 
-let buttonPress: ClickType;
+enum PressStates {
+  DOWN, UP
+}
 
-const sleepTimeout = 1000 * 60 * 10;
+type Event = {
+  state: boolean
+  time: number
+  lastTime: number
+}
 
-function assignSleeptimer() {
+let mutingType: MutingTypes = MutingTypes.TEAMS;
+let sleepTimer: NodeJS.Timeout;
+let reportInterval: NodeJS.Timeout;
+let sleepState: SleepStates;
+let buttonPressType: ClickType;
+let buttonPressState: PressStates = PressStates.UP;
+let buttonUpHandler: Function = () => {};
+
+function assignSleepTimer() {
   sleepTimer = setTimeout(() => {
     sleep();
-  }, sleepTimeout);
+  }, SLEEP_TIMEOUT);
 }
 
 function showReport() {
@@ -39,7 +60,7 @@ NRF.on('connect', (_) => {
 
 function onInit() {
   if (reportInterval) clearInterval(reportInterval);
-  setInterval(showReport, sleepTimeout);
+  setInterval(showReport, SLEEP_TIMEOUT);
   showReport();
 
   const keyboardSrvc = {
@@ -67,15 +88,16 @@ function onInit() {
   };
 
   const services = Object.assign({}, ...[keyboardSrvc, batterySrvc]);
+  const report = mutingType === MutingTypes.TEAMS ? kb.report : controls.report;
 
   NRF.setServices(services, {
     advertise: [0x180a, 0x180f],
-    hid: kb.report
+    hid: report
   });
 
   [LED1, LED2, LED3].map((l, i) => {
     l.set();
-    setTimeout(() => l.reset(), 1000);
+    setTimeout(() => l.reset(), 1000 + (i * 500));
   });
 
   setWatch(btnPressed, BTN, {
@@ -84,14 +106,14 @@ function onInit() {
     debounce: 50
   });
 
-  // NRF.setLowPowerConnection(true);
+  if (USE_LOW_POWER) NRF.setLowPowerConnection(true);
 
-  assignSleeptimer();
+  assignSleepTimer();
 }
 
 function sleep() {
   console.log("Sleeping");
-  ledOn(LED1, 2000);
+  blink(LED1, 2000);
   setTimeout(() => {
     sleepState = SleepStates.SLEEPING;
     NRF.disconnect();
@@ -102,14 +124,14 @@ function sleep() {
 function wake() {
   NRF.wake();
   sleepState = SleepStates.AWAKE;
-  ledOn(LED2, 1000);
+  blink(LED2, 2000);
   console.log("Waking up");
 }
 
 function reinitSleep() {
   if (sleepTimer !== null && sleepTimer !== undefined) clearTimeout(sleepTimer);
   if (sleepState == SleepStates.SLEEPING) wake();
-  assignSleeptimer();
+  assignSleepTimer();
 }
 
 function btnPressed(e: Event) {
@@ -117,74 +139,92 @@ function btnPressed(e: Event) {
 
   // Down
   if (e.state) {
-    buttonDown();
-    clickCheck(e);
+   // buttonDown();
+   clickCheck(e);
   // Up
   } else {
-    buttonUp();
+    // buttonUp();
   }
-}
-
-type Event = {
-  state: boolean
-  time: number
-  lastTime: number
 }
 
 function clickCheck(e: Event) {
   console.log(e);
   const timeDiff = e.time - e.lastTime;
-  if (timeDiff > 0.7 || isNaN(timeDiff)) {
-    buttonPress = ClickType.SINGLE;
+  console.log(timeDiff);
+  if (timeDiff > (DOUBLE_CLICK_DETECTION_TIME/1000) || isNaN(timeDiff)) {
+    buttonPressType = ClickType.SINGLE;
     setTimeout(() => {
-      if (buttonPress == ClickType.SINGLE) singleClick();
-    }, 500);
+      if (buttonPressType == ClickType.SINGLE) singleClick();
+    }, DOUBLE_CLICK_DETECTION_TIME);
   } else {
     doubleClick();
-    buttonPress = ClickType.DOUBLE;
+    buttonPressType = ClickType.DOUBLE;
   }
 }
 
-const muteToggle = (() => {
+const toggleMute = (() => {
   console.log("Toggle created");
   return debounce(() => {
     console.log("Toggle triggered");
-    kb.tap(kb.KEY.M, kb.MODIFY.SHIFT | kb.MODIFY.GUI);
+    mute();
   }, 200);
 })();
 
+
+type MuteResolver = Record<MutingTypes, Function>;
+function mute(): void {
+  const functions: MuteResolver = {
+    [MutingTypes.TEAMS]: () => {
+      kb.tap(kb.KEY.M, kb.MODIFY.SHIFT | kb.MODIFY.GUI)
+      console.log("Teams");
+    },
+    [MutingTypes.TELEPHONY]: () => {
+      controls.mute()
+      console.log("Telephony");
+    }
+  }
+
+  const fun = functions[mutingType]
+  fun();
+}
+
 function singleClick() {
   console.log("Single");
-  // no-op
+  mute();
+  ledOnOff(LED1, 200);
 }
 
 function doubleClick() {
   console.log("Double");
-  muteToggle();
-  ledOn(LED2);
+  ledOnOff(LED2, 200);
 }
 
 function buttonDown() {
   console.log("Down");
-  LED3.set();
-  muteToggle();
+  buttonPressState = PressStates.DOWN;
+  setTimeout(() => {
+    if (buttonPressState != PressStates.DOWN) return;
+
+    LED3.set();
+    toggleMute();
+    buttonUpHandler = () => {
+      toggleMute();
+      LED3.reset();
+    }
+  }, 300);
 }
 
 function buttonUp() {
   console.log("Up");
-  muteToggle();
-  LED3.reset();
-}
-
-function ledOn(led: Pin, duration = 500) {
-  led.write(true);
-  setTimeout(() => led.write(false), duration);
+  buttonUpHandler();
+  buttonPressState = PressStates.UP;
+  buttonUpHandler = () => {};
 }
 
 if (RELEASE) {
   // save code to flash, to make code permanent
-  setTimeout(save,1E3);
+  setTimeout(save, 1E3);
 } else {
   // or just start onInit, typical way if you are still developing and testing
-  setTimeout(onInit,1E3);
+  setTimeout(onInit, 1E3);
 }

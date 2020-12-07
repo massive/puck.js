@@ -12,18 +12,32 @@ export const debounce = <F extends (...args: any[]) => any>(func: F, waitFor: nu
   return debounced as (...args: Parameters<F>) => ReturnType<F>;
 };
 
-export function blink(led: Pin, duration: number) {
-  let intervals: Map<Pin, NodeJS.Timeout> = new Map<Pin, NodeJS.Timeout>();
+interface PinMap {
+  [key: number]: NodeJS.Timeout;
+}
 
-  return function() {
+export function ledOnOff(led: Pin, duration = 500) {
+  led.write(true);
+  setTimeout(() => led.write(false), duration);
+}
+
+export function blink(led: Pin, duration: number): void {
+  let intervals: PinMap = {};
+  // @ts-ignore
+  const pinId: number = led.getInfo().num;
+
+  const fn = () => {
     let on = false;
-    const interval = setInterval(function() {
+    const interval = setInterval(() => {
       on = !on;
       led.write(on)
-    }, 200);
-    intervals.set(led, interval);
+    }, 500);
+
+    intervals[pinId] = interval;
     setTimeout(() => {
-      if (intervals.get(led)) clearInterval(intervals.get(led));
+      const i = intervals[pinId];
+      if (i) clearInterval(i);
     }, duration)
   }
+  fn();
 }
